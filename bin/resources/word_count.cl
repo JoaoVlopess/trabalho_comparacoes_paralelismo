@@ -1,0 +1,1 @@
+peter. O código em C que o Integrante B vai rodar na GPU
