@@ -507,26 +507,32 @@ projeto/
 
 O projeto já está configurado para o VS Code via `.vscode/settings.json`. Basta pressionar **Run** na classe `Main`.
 
-Para compilar manualmente:
+Para compilar e executar manualmente:
 
 ```bash
-# Windows
-javac -cp "lib/jocl-2.0.4.jar" -sourcepath src src/main/Main.java -d bin/
-java  -cp "bin;lib/jocl-2.0.4.jar" -Djava.library.path="lib/" main.Main
+# Windows PowerShell
+javac -cp ".\lib\*" -sourcepath ".\src" -d ".\bin" ".\src\main\Main.java"
+java '-Djava.library.path=.\lib' -cp '.\bin;.\lib\*' main.Main
 
 # Linux / Mac
-javac -cp "lib/jocl-2.0.4.jar" -sourcepath src src/main/Main.java -d bin/
-java  -cp "bin:lib/jocl-2.0.4.jar" -Djava.library.path="lib/" main.Main
+javac -cp "lib/*" -sourcepath src -d bin src/main/Main.java
+java -Djava.library.path="lib" -cp "bin:lib/*" main.Main
 ```
 
 ### Gerar gráficos
 
 ```bash
+# Windows
 pip install pandas matplotlib
 python gerar_graficos.py
+
+# Linux / Mac
+pip3 install pandas matplotlib
+python3 gerar_graficos.py
+
 # Gráficos gerados em graficos/
 ```
 
 ---
 
-**Link do projeto no GitHub:** [https://github.com/JoaoVlopess/trabalho_comparacoes_paralelismo](https://github.com/JoaoVlopess/trabalho_comparacoes_paralelismo)
+**Link do projeto no GitHub:** https://github.com/JoaoVlopess/trabalho_comparacoes_paralelismo
