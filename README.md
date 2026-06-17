@@ -38,7 +38,11 @@ O framework de testes (`Main.java`) executa cada combinação de método × amos
 
 A implementação seguiu uma arquitetura comum: o `LeitorTexto.carregarETratarTexto()` centraliza o pré-processamento, garantindo que todos os métodos recebam o mesmo `String[]` já normalizado. Isso elimina variáveis de confusão na comparação de desempenho.
 
-O `ParallelGPU` recebe o mesmo array e o serializa em buffers compatíveis com OpenCL:
+**SerialCPU.** Um único laço percorre o `String[]` e incrementa um contador a cada palavra igual ao alvo. É a versão de referência (baseline) contra a qual o speedup dos demais métodos é calculado.
+
+**ParallelCPU.** O array é dividido em `numThreads` fatias de tamanho igual (`tamanhoFatia = ceil(total / numThreads)`). Cada fatia vira uma tarefa `Callable<Integer>` submetida a um `ExecutorService` com pool fixo de threads. Cada thread conta as ocorrências da sua fatia de forma independente e devolve um resultado parcial via `Future<Integer>`. Ao final, a thread principal faz a **redução**, somando todos os parciais (`future.get()`), e encerra o pool com `executor.shutdown()`. Foram testadas as configurações de 2, 4 e 8 threads.
+
+**ParallelGPU.** Recebe o mesmo array e o serializa em buffers compatíveis com OpenCL:
 
 ```
 String[] palavras  →  byte[][] allBytes  →  byte[] wordData
@@ -217,7 +221,226 @@ Do ponto de vista acadêmico, os resultados ilustram conceitos fundamentais da c
 
 ## Anexos — Códigos das Implementações
 
-> Os códigos completos estão na pasta `src/`. Abaixo, o kernel OpenCL.
+### `LeitorTexto.java` (infra — pré-processamento compartilhado)
+
+```java
+package main.infra;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+
+public class LeitorTexto {
+    public static String[] carregarETratarTexto(String caminhoArquivo) throws IOException {
+        String conteudoBruto = Files.readString(Path.of(caminhoArquivo));
+        String conteudoLimpo = conteudoBruto.toLowerCase(Locale.ROOT)
+                .replaceAll("[.,;:!?\\(\\)\"\n\r\t-]", " ");
+        return conteudoLimpo.split("\\s+");
+    }
+}
+```
+
+### `SerialCPU.java`
+
+```java
+package main.algoritmos;
+
+import main.infra.Resultado;
+
+public class SerialCPU {
+    public static Resultado executar(String[] palavras, String palavraAlvo, String nomeAmostra) {
+        long tempoInicio = System.nanoTime();
+        int contagem = 0;
+        for (String palavra : palavras) {
+            if (palavra.equals(palavraAlvo)) contagem++;
+        }
+        long tempoFim = System.nanoTime();
+        double tempoMs = (tempoFim - tempoInicio) / 1_000_000.0;
+        System.out.printf("SerialCPU [%s]: %d ocorrências em %.4f ms%n",
+                nomeAmostra, contagem, tempoMs);
+        return new Resultado("SerialCPU", nomeAmostra, palavraAlvo, contagem, tempoMs, 1);
+    }
+}
+```
+
+### `ParallelCPU.java`
+
+```java
+package main.algoritmos;
+
+import main.infra.Resultado;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.*;
+
+public class ParallelCPU {
+    public static Resultado executar(String[] palavras, String palavraAlvo,
+                                     String nomeAmostra, int numThreads) {
+        long tempoInicio = System.nanoTime();
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+        int tamanhoFatia = (int) Math.ceil((double) palavras.length / numThreads);
+        List<Future<Integer>> futuros = new ArrayList<>();
+
+        // Divisão do trabalho: cada thread recebe uma fatia do array
+        for (int i = 0; i < numThreads; i++) {
+            final int inicio = i * tamanhoFatia;
+            final int fim = Math.min(inicio + tamanhoFatia, palavras.length);
+            if (inicio < palavras.length) {
+                futuros.add(executor.submit(() -> {
+                    int count = 0;
+                    for (int j = inicio; j < fim; j++)
+                        if (palavras[j].equals(palavraAlvo)) count++;
+                    return count;
+                }));
+            }
+        }
+
+        // Redução: soma os resultados parciais de cada thread
+        int contagemTotal = 0;
+        try {
+            for (Future<Integer> f : futuros) contagemTotal += f.get();
+        } catch (Exception e) {
+            System.err.println("Erro paralelo: " + e.getMessage());
+        } finally {
+            executor.shutdown();
+        }
+
+        double tempoMs = (System.nanoTime() - tempoInicio) / 1_000_000.0;
+        System.out.printf("ParallelCPU (%dT) [%s]: %d ocorrências em %.4f ms%n",
+                numThreads, nomeAmostra, contagemTotal, tempoMs);
+        return new Resultado("ParallelCPU-" + numThreads + "T", nomeAmostra,
+                palavraAlvo, contagemTotal, tempoMs, numThreads);
+    }
+}
+```
+
+### `ParallelGPU.java`
+
+```java
+package main.algoritmos;
+
+import main.infra.Resultado;
+import org.jocl.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import static org.jocl.CL.*;
+
+public class ParallelGPU {
+    private static final String KERNEL_PATH = "src/resources/word_count.cl";
+    private static final String KERNEL_NAME = "countWord";
+
+    public static Resultado executar(String[] palavras, String palavraAlvo, String nomeAmostra) {
+        long tempoInicio = System.nanoTime();
+        int contagemTotal = 0;
+        try {
+            contagemTotal = executarOpenCL(palavras, palavraAlvo);
+        } catch (Exception e) {
+            System.err.println("[ParallelGPU] Erro OpenCL — usando fallback serial: " + e.getMessage());
+            for (String p : palavras) if (p.equals(palavraAlvo)) contagemTotal++;
+        }
+        double tempoMs = (System.nanoTime() - tempoInicio) / 1_000_000.0;
+        System.out.printf("ParallelGPU [%s]: %d ocorrências em %.4f ms%n",
+                nomeAmostra, contagemTotal, tempoMs);
+        return new Resultado("ParallelGPU", nomeAmostra, palavraAlvo, contagemTotal, tempoMs, 0);
+    }
+
+    private static int executarOpenCL(String[] palavras, String palavraAlvo) throws Exception {
+        int numWords = palavras.length;
+
+        // Serializa String[] em arrays primitivos. Converte para byte[] UTF-8 ANTES
+        // de somar totalBytes (corrige bug com caracteres multibyte: ã, ç, é...).
+        byte[][] allBytes = new byte[numWords][];
+        int totalBytes = 0;
+        for (int i = 0; i < numWords; i++) {
+            allBytes[i] = palavras[i].getBytes("UTF-8");
+            totalBytes += allBytes[i].length;
+        }
+        byte[] wordData = new byte[totalBytes];
+        int[] offsets = new int[numWords], lengths = new int[numWords];
+        int pos = 0;
+        for (int i = 0; i < numWords; i++) {
+            offsets[i] = pos; lengths[i] = allBytes[i].length;
+            System.arraycopy(allBytes[i], 0, wordData, pos, allBytes[i].length);
+            pos += allBytes[i].length;
+        }
+        byte[] targetBytes = palavraAlvo.getBytes("UTF-8");
+        int targetLen = targetBytes.length;
+
+        // Contador ÚNICO de saída, iniciado em 0 (a GPU soma tudo aqui via atomic_inc).
+        int[] count = new int[]{0};
+
+        CL.setExceptionsEnabled(true);
+        int[] np = new int[1];
+        clGetPlatformIDs(0, null, np);
+        cl_platform_id[] plats = new cl_platform_id[np[0]];
+        clGetPlatformIDs(np[0], plats, null);
+        cl_device_id device = selectDevice(plats[0]);
+        cl_context_properties props = new cl_context_properties();
+        props.addProperty(CL_CONTEXT_PLATFORM, plats[0]);
+        cl_context ctx = clCreateContext(props, 1, new cl_device_id[]{device}, null, null, null);
+
+        // OpenCL 1.2 (compatível com macOS). A variante ...WithProperties é do OpenCL 2.0.
+        cl_command_queue queue = clCreateCommandQueue(ctx, device, 0, null);
+
+        String src = new String(Files.readAllBytes(Paths.get(KERNEL_PATH)));
+        cl_program prog = clCreateProgramWithSource(ctx, 1, new String[]{src}, null, null);
+        clBuildProgram(prog, 0, null, null, null, null);
+        cl_kernel kernel = clCreateKernel(prog, KERNEL_NAME, null);
+
+        cl_mem bWD = clCreateBuffer(ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_char*totalBytes, Pointer.to(wordData), null);
+        cl_mem bOff = clCreateBuffer(ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_int*numWords, Pointer.to(offsets), null);
+        cl_mem bLen = clCreateBuffer(ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_int*numWords, Pointer.to(lengths), null);
+        cl_mem bTgt = clCreateBuffer(ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_char*targetLen, Pointer.to(targetBytes), null);
+        // READ_WRITE (o atomic lê e escreve) + COPY_HOST_PTR para inicializar em 0.
+        cl_mem bCnt = clCreateBuffer(ctx, CL_MEM_READ_WRITE|CL_MEM_COPY_HOST_PTR,
+                Sizeof.cl_int, Pointer.to(count), null);
+
+        clSetKernelArg(kernel, 0, Sizeof.cl_mem, Pointer.to(bWD));
+        clSetKernelArg(kernel, 1, Sizeof.cl_mem, Pointer.to(bOff));
+        clSetKernelArg(kernel, 2, Sizeof.cl_mem, Pointer.to(bLen));
+        clSetKernelArg(kernel, 3, Sizeof.cl_mem, Pointer.to(bTgt));
+        clSetKernelArg(kernel, 4, Sizeof.cl_int, Pointer.to(new int[]{targetLen}));
+        clSetKernelArg(kernel, 5, Sizeof.cl_mem, Pointer.to(bCnt));
+        clSetKernelArg(kernel, 6, Sizeof.cl_int, Pointer.to(new int[]{numWords}));
+
+        clEnqueueNDRangeKernel(queue, kernel, 1, null, new long[]{numWords}, null, 0, null, null);
+        clFinish(queue);
+        clEnqueueReadBuffer(queue, bCnt, CL_TRUE, 0, Sizeof.cl_int,
+                Pointer.to(count), 0, null, null);
+
+        for (cl_mem m : new cl_mem[]{bWD,bOff,bLen,bTgt,bCnt}) clReleaseMemObject(m);
+        clReleaseKernel(kernel); clReleaseProgram(prog);
+        clReleaseCommandQueue(queue); clReleaseContext(ctx);
+
+        // A GPU já fez a redução via atomic_inc — sem laço de soma na CPU.
+        return count[0];
+    }
+
+    private static cl_device_id selectDevice(cl_platform_id platform) {
+        try {
+            int[] n = new int[1];
+            clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, null, n);
+            if (n[0] > 0) {
+                cl_device_id[] d = new cl_device_id[n[0]];
+                clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, n[0], d, null);
+                System.out.println("[ParallelGPU] Dispositivo: GPU");
+                return d[0];
+            }
+        } catch (CLException ignored) {}
+        int[] n = new int[1];
+        clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 0, null, n);
+        cl_device_id[] d = new cl_device_id[n[0]];
+        clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, n[0], d, null);
+        System.out.println("[ParallelGPU] GPU não encontrada — usando CPU via OpenCL.");
+        return d[0];
+    }
+}
+```
 
 ### `word_count.cl` (Kernel OpenCL)
 
@@ -242,7 +465,42 @@ __kernel void countWord(
 }
 ```
 
-(Os arquivos `LeitorTexto.java`, `SerialCPU.java`, `ParallelCPU.java`, `ParallelGPU.java`, `ExportadorCsv.java`, `Resultado.java` e `Main.java` encontram-se em `src/`.)
+### `Main.java`
+
+```java
+package main;
+
+import main.algoritmos.*;
+import main.infra.*;
+import java.io.IOException;
+import java.util.*;
+
+public class Main {
+    private static final int    REPETICOES      = 3;
+    private static final int[]  CONFIGS_THREADS = {2, 4, 8};
+    private static final String PALAVRA_ALVO    = "que";
+
+    public static void main(String[] args) throws IOException {
+        String[][] amostras = {
+            {"data/amostra_pequena.txt", "Pequena"},
+            {"data/amostra_media.txt",   "Media"},
+            {"data/amostra_grande.txt",  "Grande"},
+        };
+        List<Resultado> todos = new ArrayList<>();
+        for (String[] amostra : amostras) {
+            String[] palavras = LeitorTexto.carregarETratarTexto(amostra[0]);
+            for (int i = 0; i < REPETICOES; i++)
+                todos.add(SerialCPU.executar(palavras, PALAVRA_ALVO, amostra[1]));
+            for (int t : CONFIGS_THREADS)
+                for (int i = 0; i < REPETICOES; i++)
+                    todos.add(ParallelCPU.executar(palavras, PALAVRA_ALVO, amostra[1], t));
+            for (int i = 0; i < REPETICOES; i++)
+                todos.add(ParallelGPU.executar(palavras, PALAVRA_ALVO, amostra[1]));
+        }
+        ExportadorCsv.exportar(todos, "resultados.csv");
+    }
+}
+```
 
 ---
 
