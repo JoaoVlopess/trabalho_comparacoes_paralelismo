@@ -3,10 +3,6 @@
 /bin/
 *.class
 
-# Dependências baixadas
-/dependencies/
-/lib/
-
 # Arquivos gerados pelo Gradle
 .gradle/
 build/
