@@ -8,7 +8,7 @@
 
 ## Resumo
 
-Este trabalho apresenta uma análise comparativa de desempenho entre três abordagens de contagem de palavras em texto: execução **serial na CPU**, **paralela na CPU** com múltiplas threads e **paralela na GPU** via OpenCL. O problema consiste em contar as ocorrências da palavra `"que"` em três arquivos de texto de tamanhos distintos (Pequena, Média e Grande). Os algoritmos foram implementados em Java, os tempos de execução foram registrados em arquivo CSV e os resultados foram analisados estatisticamente com suporte de gráficos gerados em Python. Os experimentos revelam que o paralelismo em CPU apresenta ganhos consistentes apenas para volumes maiores de dados, enquanto o overhead de inicialização do OpenCL torna a GPU menos eficiente do que a CPU para os tamanhos de entrada utilizados neste estudo — mesmo após otimizarmos a redução para ser feita na própria GPU com operações atômicas.
+Este trabalho apresenta uma análise comparativa de desempenho entre três abordagens de contagem de palavras em texto: execução **serial na CPU**, **paralela na CPU** com múltiplas threads e **paralela na GPU** via OpenCL. O problema consiste em contar as ocorrências da palavra `"que"` em três arquivos de texto de tamanhos distintos (Pequena, Média e Grande). Os algoritmos foram implementados em Java, os tempos de execução foram registrados em arquivo CSV e os resultados foram analisados estatisticamente com suporte de gráficos gerados em Python. Os experimentos revelam que o paralelismo só tende a compensar para volumes grandes de dados, enquanto o overhead de coordenação (criação de threads, na CPU) e de inicialização/transferência (OpenCL, na GPU) torna os métodos paralelos menos eficientes do que o serial para os tamanhos de entrada utilizados neste estudo — mesmo após otimizarmos a redução da GPU com operações atômicas.
 
 ---
 
@@ -103,29 +103,31 @@ A versão final faz a **redução dentro da GPU**: existe um **único contador g
 
 ## Resultados e Discussão
 
-> Os tempos absolutos dependem da máquina; o que importa são os **padrões**. Tabelas geradas a partir de `resultados.csv`; gráficos por `gerar_graficos.py`. Reexecute para atualizar os valores no seu ambiente.
+> Os tempos absolutos dependem fortemente da máquina e do aquecimento da JVM; o que importa são os **padrões**. Os valores abaixo são de uma execução em notebook com Windows. Reexecute (`Main.java` + `gerar_graficos.py`) para atualizar no seu ambiente.
 
 ### Tabela de tempos médios (ms)
 
 | Método | Pequena | Média | Grande |
 |--------|--------:|------:|-------:|
-| SerialCPU | **0,012** | **0,058** | 0,383 |
-| ParallelCPU-2T | 1,239 | 0,360 | 0,340 |
-| ParallelCPU-4T | 0,145 | 0,228 | **0,259** |
-| ParallelCPU-8T | 0,221 | 0,292 | 0,366 |
-| ParallelGPU | 120,567 | 4,059 | 5,970 |
+| SerialCPU | **0,062** | **0,459** | **3,132** |
+| ParallelCPU-2T | 12,493 | 30,218 | 12,827 |
+| ParallelCPU-4T | 6,533 | 13,277 | 4,979 |
+| ParallelCPU-8T | 5,064 | 23,719 | 10,025 |
+| ParallelGPU | 1268,325 | 278,387 | 143,305 |
+
+O `SerialCPU` foi o mais rápido em todas as amostras. Entre os métodos paralelos de CPU, o `ParallelCPU-4T` foi consistentemente o melhor (menor tempo).
 
 ### Gráfico 1 — Tempo médio por método e amostra (barras agrupadas)
 
 ![Tempo médio por método e amostra](graficos/1_tempo_medio_por_metodo.png)
 
-A GPU é o método mais lento em todas as amostras. O valor alto na amostra Pequena (~120 ms de média) **não** é causado pelo tamanho do dado, e sim pelo *cold start*: a primeira chamada OpenCL do processo paga um custo único de inicialização do driver da GPU, aquecimento do JIT e compilação do kernel (na nossa execução, ~350 ms na primeira repetição; as demais ficaram em ~4 ms). Como há apenas 3 repetições, esse outlier infla a média.
+A GPU é, de longe, o método mais lento em todas as amostras. O valor altíssimo na amostra Pequena (~1268 ms de média) **não** é causado pelo tamanho do dado, e sim pelo *cold start*: a primeira chamada OpenCL do processo paga um custo único de inicialização do driver da GPU, aquecimento do JIT e compilação do kernel (na nossa execução, ~3408 ms na primeira repetição; as demais caíram para ~200 ms). Como há apenas 3 repetições, esse outlier infla a média — por isso a média da GPU **diminui** da Pequena para a Grande.
 
 ### Gráfico 2 — Tempo vs. número de threads (linhas)
 
 ![Tempo vs número de threads](graficos/2_tempo_vs_threads.png)
 
-Na amostra Grande, o tempo cai de 1→4 threads e volta a subir em 8, indicando saturação dos núcleos físicos: o ponto ótimo de threads acompanha o número de núcleos disponíveis na máquina. Acima disso, o custo de troca de contexto supera o ganho de paralelismo.
+Subir de 1 thread (serial) para 2 threads **piora** o tempo em todas as amostras: é o custo fixo de criar o `ExecutorService` e aquecer a JVM. Entre as configurações paralelas, **4 threads** tende a ser o melhor ponto (menor tempo na Média e na Grande); 8 threads volta a piorar, indicando saturação dos núcleos físicos disponíveis.
 
 ### Gráfico 3 — Speedup relativo ao SerialCPU
 
@@ -133,24 +135,24 @@ Na amostra Grande, o tempo cai de 1→4 threads e volta a subir em 8, indicando 
 
 | Método | Pequena | Média | Grande |
 |--------|--------:|------:|-------:|
-| ParallelCPU-2T | 0,01× | 0,16× | 1,13× |
-| ParallelCPU-4T | 0,08× | 0,26× | **1,48×** |
-| ParallelCPU-8T | 0,06× | 0,20× | 1,05× |
-| ParallelGPU | 0,00× | 0,01× | 0,06× |
+| ParallelCPU-2T | 0,00× | 0,02× | 0,24× |
+| ParallelCPU-4T | 0,01× | 0,03× | **0,63×** |
+| ParallelCPU-8T | 0,01× | 0,02× | 0,31× |
+| ParallelGPU | 0,00× | 0,00× | 0,02× |
 
-O paralelismo de CPU só supera o serial (speedup > 1×) na amostra Grande, com o `ParallelCPU-4T` atingindo ~1,48×. Nas amostras menores, o overhead de criar o `ExecutorService` e dividir o array supera o ganho computacional.
+Nesta máquina, **nenhum método paralelo superou o serial** (todos abaixo de 1×). O melhor foi o `ParallelCPU-4T`, que chegou a 0,63× na amostra Grande — ainda abaixo do serial, mas claramente **subindo** conforme o volume cresce. A tendência indica que, com textos suficientemente grandes, o 4T ultrapassaria o serial. O serial é tão rápido para estes tamanhos que o custo de coordenar threads não se paga.
 
 ### Gráfico 4 — Boxplot da distribuição dos tempos
 
 ![Distribuição dos tempos (boxplot)](graficos/4_boxplot_distribuicao.png)
 
-O boxplot revela a altíssima variância da GPU na amostra Pequena, reflexo do outlier de *cold start* da primeira execução. Os métodos de CPU apresentam distribuições estreitas e consistentes.
+O boxplot revela a altíssima variância da GPU na amostra Pequena, reflexo do outlier de *cold start* da primeira execução. Os métodos paralelos de CPU também apresentam variância considerável por causa do aquecimento da JVM nas primeiras repetições; o `SerialCPU` é o mais estável.
 
 ### Gráfico 5 — Heatmap (tempo médio)
 
 ![Heatmap do tempo médio](graficos/5_heatmap_tempo_medio.png)
 
-O heatmap integra a visão geral: o `SerialCPU` domina nas amostras menores e o `ParallelCPU-4T` é o melhor na amostra Grande, enquanto a GPU se destaca como a mais lenta.
+O heatmap integra a visão geral: o `SerialCPU` domina (mais claro = mais rápido) em todas as amostras, enquanto a GPU se destaca como a mais lenta (mais escuro), sobretudo na Pequena por causa do cold start.
 
 ---
 
@@ -158,13 +160,15 @@ O heatmap integra a visão geral: o `SerialCPU` domina nas amostras menores e o 
 
 Este é o resultado mais relevante do experimento e merece análise cuidadosa.
 
-**1. Overhead de inicialização (cold start):** a primeira chamada OpenCL do processo paga um custo único alto — inicialização do driver da GPU, aquecimento do JIT/JNI e compilação do kernel em runtime (`clBuildProgram`). Na nossa execução isso ficou em torno de ~350 ms, contra ~4 ms das chamadas seguintes. Para arquivos pequenos esse custo fixo domina o tempo total.
+**1. Overhead de inicialização (cold start):** a primeira chamada OpenCL do processo paga um custo único alto — inicialização do driver da GPU, aquecimento do JIT/JNI e compilação do kernel em runtime (`clBuildProgram`). Na nossa execução isso chegou a ~3408 ms na primeira repetição, contra ~140–280 ms nas seguintes. Para arquivos pequenos esse custo fixo domina o tempo total.
 
-**2. Transferência de memória:** copiar os buffers `wordData`, `offsets` e `lengths` para a memória da GPU e sincronizar a execução tem latência própria, que não se justifica para poucos KB/MB de dados.
+**2. Transferência de memória e sincronização:** copiar os buffers `wordData`, `offsets` e `lengths` para a memória da GPU, disparar o kernel e sincronizar (`clFinish`) tem latência própria, que não se justifica para poucos KB/MB de dados.
 
 **3. Natureza *memory-bound* do problema:** contagem de palavras é uma varredura linear com computação mínima por elemento (poucas comparações por palavra). GPUs brilham em problemas *compute-bound* (multiplicação de matrizes, redes neurais), onde o custo de transferência se dilui sobre muitos ciclos de cálculo.
 
-**4. Redução já otimizada na GPU:** nesta versão, a soma é feita na própria GPU com `atomic_inc` num contador único, e apenas 1 inteiro é transferido de volta (ver "Otimização aplicada"). Isso reduz a transferência e elimina o laço de soma na CPU — mas, dado o tamanho dos dados, não é suficiente para a GPU superar a CPU.
+**4. Recriação do contexto a cada chamada:** nesta implementação, cada execução recria contexto, fila e buffers e recompila o kernel. Esse custo fixo é pago a cada uma das 3 repetições, mantendo os tempos da GPU altos mesmo nas amostras maiores.
+
+A redução já foi **otimizada** para a GPU (um único contador com `atomic_inc`, ver "Otimização aplicada"), reduzindo a transferência de volta a 1 inteiro — mas, dado o perfil do problema, isso não é suficiente para a GPU superar a CPU nestes tamanhos.
 
 **Quando a GPU seria vantajosa?** Com textos da ordem de centenas de MB a GB, e especialmente reutilizando contexto e buffers entre múltiplas consultas (sem reinicializar o OpenCL a cada chamada), o custo fixo se diluiria e o paralelismo massivo se tornaria competitivo.
 
@@ -190,7 +194,7 @@ Este trabalho implementou e comparou três abordagens de contagem de palavras em
 
 Os experimentos demonstraram que:
 
-**O ParallelCPU-4T foi o único método paralelo a superar o SerialCPU**, e apenas na amostra Grande (~1,48× de speedup). Nas amostras Pequena e Média, o overhead de criação do pool de threads superou o ganho computacional, tornando o serial mais rápido.
+**O SerialCPU foi o mais rápido em todas as amostras** neste hardware. Nenhum método paralelo superou o serial, porque o trabalho útil (contar ~4% de palavras) é pequeno demais para amortizar o custo de coordenação. Ainda assim, o `ParallelCPU-4T` foi a melhor configuração paralela e **se aproximou do serial conforme o volume cresceu** (0,63× na amostra Grande), indicando que ultrapassaria o serial com entradas maiores.
 
 **O ParallelGPU apresentou os maiores tempos absolutos** em todos os cenários. Isso não indica falha de implementação — a redução foi inclusive otimizada para a GPU com operações atômicas — mas sim uma incompatibilidade entre o perfil do problema (varredura linear, memory-bound, dados pequenos) e as características da GPU (alto custo de inicialização e de transferência).
 
@@ -208,6 +212,37 @@ Do ponto de vista acadêmico, os resultados ilustram conceitos fundamentais da c
 4. JOCL — Java Bindings for OpenCL. Disponível em: <http://www.jocl.org/>. Acesso em: jun. 2025.
 5. ORACLE. **Java SE 11 — java.util.concurrent**. Disponível em: <https://docs.oracle.com/en/java/docs/api/>. Acesso em: jun. 2025.
 6. GOETZ, B. et al. **Java Concurrency in Practice**. Addison-Wesley, 2006.
+
+---
+
+## Anexos — Códigos das Implementações
+
+> Os códigos completos estão na pasta `src/`. Abaixo, o kernel OpenCL.
+
+### `word_count.cl` (Kernel OpenCL)
+
+```c
+__kernel void countWord(
+    __global const char* wordData,
+    __global const int*  offsets,
+    __global const int*  lengths,
+    __global const char* target,
+    const int            targetLen,
+    __global int*        globalCount,
+    const int            numWords
+) {
+    int i = get_global_id(0);
+    if (i >= numWords) return;
+    if (lengths[i] != targetLen) return;     // tamanho diferente => não é
+    int offset = offsets[i];
+    for (int k = 0; k < targetLen; k++) {
+        if (wordData[offset + k] != target[k]) return; // achou diferença
+    }
+    atomic_inc(globalCount);                 // é igual => soma +1 (atômico)
+}
+```
+
+(Os arquivos `LeitorTexto.java`, `SerialCPU.java`, `ParallelCPU.java`, `ParallelGPU.java`, `ExportadorCsv.java`, `Resultado.java` e `Main.java` encontram-se em `src/`.)
 
 ---
 
