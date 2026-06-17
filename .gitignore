@@ -1,7 +1,6 @@
 # Arquivos de compilação e build
 /target/
 /bin/
-/build/
 *.class
 
 # Dependências baixadas
@@ -29,6 +28,3 @@ logs/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
-/graficos/
-resultados.csv
